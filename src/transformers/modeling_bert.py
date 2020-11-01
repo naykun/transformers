@@ -418,6 +418,7 @@ class BertLayer(nn.Module):
             )
             attention_output = cross_attention_outputs[0]
             outputs = outputs + cross_attention_outputs[1:]  # add cross attentions if we output attention weights
+            # breakpoint()
 
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
@@ -483,7 +484,7 @@ class BertEncoder(nn.Module):
                 )
             hidden_states = layer_outputs[0]
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+                all_attentions = all_attentions + (layer_outputs[1:],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
