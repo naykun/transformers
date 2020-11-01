@@ -111,6 +111,7 @@ class GenerationMixin:
     def generate(
         self,
         input_ids: Optional[torch.LongTensor] = None,
+        input_embeds: Optional[torch.LongTensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         max_length: Optional[int] = None,
         min_length: Optional[int] = None,
@@ -286,6 +287,8 @@ class GenerationMixin:
 
         if input_ids is not None:
             batch_size = input_ids.shape[0]  # overridden by the input batch_size
+        elif input_embeds is not None:
+            batch_size = input_embeds.shape[0]
         else:
             batch_size = 1
 
@@ -299,9 +302,9 @@ class GenerationMixin:
         assert isinstance(top_k, int) and top_k >= 0, "`top_k` should be a positive integer."
         assert 0 <= top_p <= 1, "`top_p` should be between 0 and 1."
         assert repetition_penalty >= 1.0, "`repetition_penalty` should be >= 1."
-        assert input_ids is not None or (
+        assert input_ids is not None or input_embeds is not None or (
             isinstance(bos_token_id, int) and bos_token_id >= 0
-        ), "If input_ids is not defined, `bos_token_id` should be a positive integer."
+        ), "If input_ids or input_embedding is not defined, `bos_token_id` should be a positive integer."
         assert pad_token_id is None or (
             isinstance(pad_token_id, int) and (pad_token_id >= 0)
         ), "`pad_token_id` should be a positive integer."
@@ -319,7 +322,7 @@ class GenerationMixin:
             bad_words_ids is None or isinstance(bad_words_ids, list) and isinstance(bad_words_ids[0], list)
         ), "`bad_words_ids` is either `None` or a list of lists of tokens that should not be generated"
 
-        if input_ids is None:
+        if input_ids is None and input_embeds is None:
             assert isinstance(bos_token_id, int) and bos_token_id >= 0, (
                 "you should either supply a context to complete as `input_ids` input "
                 "or a `bos_token_id` (integer >= 0) as a first token to start the generation."
@@ -330,7 +333,7 @@ class GenerationMixin:
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
-        else:
+        elif input_embeds is None:
             assert input_ids.dim() == 2, "Input prompt should be of shape (batch_size, sequence length)."
 
         # not allow to duplicate outputs when greedy decoding
@@ -349,10 +352,14 @@ class GenerationMixin:
 
         # create attention mask if necessary
         # TODO (PVP): this should later be handled by the forward fn() in each model in the future see PR 3140
-        if (attention_mask is None) and (pad_token_id is not None) and (pad_token_id in input_ids):
-            attention_mask = input_ids.ne(pad_token_id).long()
-        elif attention_mask is None:
-            attention_mask = input_ids.new_ones(input_ids.shape)
+        if self.config.is_encoder_decoder:
+            pass
+            attention_mask = None
+        else:
+            if (attention_mask is None) and (pad_token_id is not None) and (pad_token_id in input_ids):
+                attention_mask = input_ids.ne(pad_token_id).long()
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape)
 
         # set pad_token_id to eos_token_id if not set. Important that this is done after
         # attention_mask is created
@@ -403,22 +410,33 @@ class GenerationMixin:
 
             # get encoder and store encoder outputs
             encoder = self.get_encoder()
-            encoder_outputs: ModelOutput = encoder(input_ids, attention_mask=attention_mask, return_dict=True)
+            encoder_outputs: ModelOutput = encoder(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=input_embeds, return_dict=True)
 
         # Expand input ids if num_beams > 1 or num_return_sequences > 1
         if num_return_sequences > 1 or num_beams > 1:
-            input_ids_len = input_ids.shape[-1]
-            input_ids = input_ids.unsqueeze(1).expand(batch_size, effective_batch_mult * num_beams, input_ids_len)
-            attention_mask = attention_mask.unsqueeze(1).expand(
-                batch_size, effective_batch_mult * num_beams, input_ids_len
-            )
+            if input_ids is not None:
+                input_ids_len = input_ids.shape[-1]
+                input_ids = input_ids.unsqueeze(1).expand(batch_size, effective_batch_mult * num_beams, input_ids_len)
+                attention_mask = attention_mask.unsqueeze(1).expand(
+                    batch_size, effective_batch_mult * num_beams, input_ids_len
+                )
 
-            input_ids = input_ids.contiguous().view(
-                effective_batch_size * num_beams, input_ids_len
-            )  # shape: (batch_size * num_return_sequences * num_beams, cur_len)
-            attention_mask = attention_mask.contiguous().view(
-                effective_batch_size * num_beams, input_ids_len
-            )  # shape: (batch_size * num_return_sequences * num_beams, cur_len)
+                input_ids = input_ids.contiguous().view(
+                    effective_batch_size * num_beams, input_ids_len
+                )  # shape: (batch_size * num_return_sequences * num_beams, cur_len)
+                attention_mask = attention_mask.contiguous().view(
+                    effective_batch_size * num_beams, input_ids_len
+                )  # shape: (batch_size * num_return_sequences * num_beams, cur_len)
+            elif input_embeds is not None and self.config.is_encoder_decoder:
+                input_embeds_len = input_embeds.shape[1]
+                embedding_size = input_embeds.shape[-1]
+                input_embeds = input_embeds.unsqueeze(1).expand(batch_size, effective_batch_mult * num_beams, input_embeds_len, embedding_size)
+
+                input_embeds = input_embeds.contiguous().view(
+                    effective_batch_size * num_beams, input_embeds_len, embedding_size
+                )
+                attention_mask = None
+
 
         if self.config.is_encoder_decoder:
             device = next(self.parameters()).device
