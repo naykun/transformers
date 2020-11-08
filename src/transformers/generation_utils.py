@@ -57,10 +57,10 @@ class GenerationMixin:
         """
         return logits
 
-    def _prepare_input_ids_for_generation(self, bos_token_id: int) -> torch.LongTensor:
+    def _prepare_input_ids_for_generation(self, bos_token_id: int, batch_size: int = 1) -> torch.LongTensor:
         if bos_token_id is None:
             raise ValueError("`bos_token_id` has to be defined when no `input_ids` are provided.")
-        return torch.ones((1, 1), dtype=torch.long, device=self.device) * bos_token_id
+        return torch.ones((batch_size, 1), dtype=torch.long, device=self.device) * bos_token_id
 
     def _prepare_attention_mask_for_generation(
         self, input_ids: torch.Tensor, pad_token_id: int, eos_token_id: int
@@ -163,12 +163,17 @@ class GenerationMixin:
 
     @staticmethod
     def _init_sequence_length_for_generation(
-        input_ids: torch.LongTensor, max_length: int
+        input_ids: torch.LongTensor, max_length: int, input_embeds: torch.FloatTensor = None
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
-        sequence_lengths = input_ids.new(input_ids.shape[0]).fill_(max_length)
+        if input_embeds is not None:
+            batch_size = input_embeds.shape[0]
+            cur_len = input_embeds.shape[1]
+        else:
+            batch_size = input_ids.shape[0]
+            cur_len = input_ids.shape[-1]
+        unfinished_sequences = input_ids.new(batch_size).fill_(1)
+        sequence_lengths = input_ids.new(batch_size).fill_(max_length)
 
-        cur_len = input_ids.shape[-1]
         return sequence_lengths, unfinished_sequences, cur_len
 
     @staticmethod
@@ -451,7 +456,7 @@ class GenerationMixin:
 
         if input_ids is None:
             # init `input_ids` with bos_token_id
-            input_ids = self._prepare_input_ids_for_generation(bos_token_id)
+            input_ids = self._prepare_input_ids_for_generation(bos_token_id, batch_size=1 if input_embeds is None else input_embeds.shape[0])
 
         if model_kwargs.get("attention_mask", None) is None:
             # init `attention_mask` depending on `pad_token_id`
@@ -475,7 +480,6 @@ class GenerationMixin:
 
             if "encoder_outputs" not in model_kwargs or not isinstance(model_kwargs["encoder_outputs"], ModelOutput):
                 raise ValueError("Make sure that `model_kwargs` include `encoder_outputs` of type `ModelOutput`.")
-
         # determine generation mode
         is_greedy_gen_mode = (num_beams == 1) and do_sample is False
         is_sample_gen_mode = (num_beams == 1) and do_sample is True
